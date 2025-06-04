@@ -1,0 +1,243 @@
+$$SYSTEM$$
+
+You are an expert at analyzing Nextflow process definitions and creating regex patterns to identify specific process executions from system call traces.
+
+$$USER$$
+
+# Nextflow Process Regex Pattern Generator
+
+## Task
+Given a Nextflow process definition, analyze the command script within a specified line range and generate a regex pattern that can uniquely identify the main process execution from `sched_process_exec` events. The regex will be matched against the joined command arguments (`argv.join(' ')`).
+
+## Input Format
+You will receive:
+1. `<file>`: The path to the Nextflow module file
+2. `<process>`: The name of the Nextflow process
+3. `<source>`: The complete source code of the process with line numbers
+4. `<range>`: The specific line range containing the command script to analyze
+5. `<example>`: One or more execution examples showing:
+   - Label describing the example
+   - The actual script that was executed
+   - The corresponding `sched_process_exec_events` showing COMM and ARGV values
+
+## Analysis Guidelines
+1. **Identify the primary command**: Look for the main executable being called (not helper commands like `cut`, `sed`, etc.)
+2. **Extract fixed patterns**: Identify command arguments that are always present
+3. **Handle variable parts**: Use appropriate regex patterns for variable inputs like filenames
+4. **Consider command structure**: Pay attention to the order of arguments and required options
+5. **Avoid over-matching**: Ensure the pattern won't match unrelated processes
+
+## Quality Score Criteria
+Rate the pattern quality from 0-100 based on:
+- **100**: Perfect specificity with no chance of false positives/negatives
+- **90-99**: Very high confidence, minimal edge cases
+- **80-89**: Good pattern, but some rare edge cases possible
+- **70-79**: Reasonable pattern, but some scenarios might be missed
+- **Below 70**: Pattern has significant limitations
+
+## Output Format
+Provide your analysis in the following XML structure:
+
+```xml
+<regex_pattern>
+  <pattern>YOUR_REGEX_PATTERN_HERE</pattern>
+  <quality_score>SCORE_0_TO_100</quality_score>
+  <reasoning>One sentence explaining the quality score based on potential edge cases or limitations.</reasoning>
+</regex_pattern>
+```
+
+## Example Analysis
+
+For a kallisto index process with examples showing:
+- `kallisto index -i kallisto Homo_sapiens.GRCh38.cdna.all.fa.gz`
+- `kallisto index -k 31 -i kallisto Mus_musculus.GRCm39.cdna.all.fa.gz`
+
+A good regex pattern might be: `^kallisto index.*-i kallisto.*\.fa(\.gz)?$`
+
+This would match the kallisto index command with the required `-i kallisto` output argument and a FASTA file input.
+
+## Important Notes
+- Focus on the primary process command, not auxiliary commands like version extraction
+- The regex should work when matched against space-joined argv values (from sched_process_exec events)
+- Consider optional arguments that might appear between fixed arguments
+- Escape special regex characters properly
+- Test your pattern mentally against the provided examples to ensure it matches correctly
+
+$$ASSISTANT$$
+
+I can do that.
+
+$$USER$$
+
+<file>/root/rnaseq/modules/nf-core/bedtools/genomecov/main.nf</file>
+<process>BEDTOOLS_GENOMECOV</process>
+<source>
+0: process BEDTOOLS_GENOMECOV {
+1:     tag "$meta.id"
+2:     label 'process_single'
+3: 
+4:     conda "${moduleDir}/environment.yml"
+5:     container 'nf-core/bedtools_coreutils:a623c13f66d5262b'
+6: 
+7:     input:
+8:     tuple val(meta), path(intervals), val(scale)
+9:     path  sizes
+10:     val   extension
+11:     val   sort
+12: 
+13:     output:
+14:     tuple val(meta), path("*.${extension}"), emit: genomecov
+15:     path  "versions.yml"                   , emit: versions
+16: 
+17:     when:
+18:     task.ext.when == null || task.ext.when
+19: 
+20:     script:
+21:     def args      = task.ext.args  ?: ''
+22:     def args_list = args.tokenize()
+23:     args += (scale > 0 && scale != 1) ? " -scale $scale" : ""
+24:     if (!args_list.contains('-bg') && (scale > 0 && scale != 1)) {
+25:         args += " -bg"
+26:     }
+27:     // Sorts output file by chromosome and position using additional options for performance and consistency
+28:     // See https://www.biostars.org/p/66927/ for further details
+29:     def buffer   = task.memory ? "--buffer-size=${task.memory.toGiga().intdiv(2)}G" : ''
+30:     def sort_cmd = sort ? "| LC_ALL=C sort --parallel=$task.cpus $buffer -k1,1 -k2,2n" : ''
+31: 
+32:     def prefix = task.ext.prefix ?: "${meta.id}"
+33:     if (intervals.name =~ /\.bam/) {
+34:         """
+35:         bedtools \\
+36:             genomecov \\
+37:             -ibam $intervals \\
+38:             $args \\
+39:             $sort_cmd \\
+40:             > ${prefix}.${extension}
+41: 
+42:         cat <<-END_VERSIONS > versions.yml
+43:         "${task.process}":
+44:             bedtools: \$(bedtools --version | sed -e "s/bedtools v//g")
+45:         END_VERSIONS
+46:         """
+47:     } else {
+48:         """
+49:         bedtools \\
+50:             genomecov \\
+51:             -i $intervals \\
+52:             -g $sizes \\
+53:             $args \\
+54:             $sort_cmd \\
+55:             > ${prefix}.${extension}
+56: 
+57:         cat <<-END_VERSIONS > versions.yml
+58:         "${task.process}":
+59:             bedtools: \$(bedtools --version | sed -e "s/bedtools v//g")
+60:         END_VERSIONS
+61:         """
+62:     }
+63: 
+64:     stub:
+65:     def prefix = task.ext.prefix ?: "${meta.id}"
+66:     """
+67:     touch  ${prefix}.${extension}
+68: 
+69:     cat <<-END_VERSIONS > versions.yml
+70:     "${task.process}":
+71:         bedtools: \$(bedtools --version | sed -e "s/bedtools v//g")
+72:     END_VERSIONS
+73:     """
+74: }
+75: 
+</source>
+<range>Lines 48:62</range>
+<example>
+<label>BED intervals file with sorting enabled</label>
+
+<script>
+bedtools \
+    genomecov \
+    -i sample1_peaks.bed \
+    -g hg38.chrom.sizes \
+    -bg \
+    | LC_ALL=C sort --parallel=4 --buffer-size=8G -k1,1 -k2,2n \
+    > sample1.bedgraph
+
+cat <<-END_VERSIONS > versions.yml
+"PROCESS_NAME":
+    bedtools: 2.30.0
+END_VERSIONS
+</script>
+
+<sched_process_exec_events>
+COMM: bedtools; ARGV: ["bedtools", "genomecov", "-i", "sample1_peaks.bed", "-g", "hg38.chrom.sizes", "-bg"]
+COMM: sort; ARGV: ["sort", "--parallel=4", "--buffer-size=8G", "-k1,1", "-k2,2n"]
+COMM: cat; ARGV: ["cat"]
+COMM: bedtools; ARGV: ["bedtools", "--version"]
+COMM: sed; ARGV: ["sed", "-e", "s/bedtools v//g"]
+</sched_process_exec_events>
+</example>
+
+<example>
+<label>BED intervals file without sorting</label>
+
+<script>
+bedtools \
+    genomecov \
+    -i chip_seq_peaks.narrowPeak \
+    -g mm10.genome \
+    -scale 2.5 -bg \
+     \
+    > chip_peaks.bg
+
+cat <<-END_VERSIONS > versions.yml
+"PROCESS_NAME":
+    bedtools: 2.30.0
+END_VERSIONS
+</script>
+
+<sched_process_exec_events>
+COMM: bedtools; ARGV: ["bedtools", "genomecov", "-i", "chip_seq_peaks.narrowPeak", "-g", "mm10.genome", "-scale", "2.5", "-bg"]
+COMM: cat; ARGV: ["cat"]
+COMM: bedtools; ARGV: ["bedtools", "--version"]
+COMM: sed; ARGV: ["sed", "-e", "s/bedtools v//g"]
+</sched_process_exec_events>
+</example>
+
+<example>
+<label>GTF intervals file with custom arguments and sorting</label>
+
+<script>
+bedtools \
+    genomecov \
+    -i transcripts.gtf \
+    -g dm6.chrom.sizes \
+    -d -strand \
+    | LC_ALL=C sort --parallel=8 --buffer-size=16G -k1,1 -k2,2n \
+    > coverage_per_base.txt
+
+cat <<-END_VERSIONS > versions.yml
+"PROCESS_NAME":
+    bedtools: 2.30.0
+END_VERSIONS
+</script>
+
+<sched_process_exec_events>
+COMM: bedtools; ARGV: ["bedtools", "genomecov", "-i", "transcripts.gtf", "-g", "dm6.chrom.sizes", "-d", "-strand"]
+COMM: sort; ARGV: ["sort", "--parallel=8", "--buffer-size=16G", "-k1,1", "-k2,2n"]
+COMM: cat; ARGV: ["cat"]
+COMM: bedtools; ARGV: ["bedtools", "--version"]
+COMM: sed; ARGV: ["sed", "-e", "s/bedtools v//g"]
+</sched_process_exec_events>
+</example>
+
+$$ASSISTANT$$
+
+<regex_pattern>
+  <pattern>^bedtools genomecov.-i \S+.-g \S+</pattern>
+  <quality_score>95</quality_score>
+  <reasoning>The pattern reliably matches bedtools genomecov commands with required -i and -g arguments, with only minimal risk of false positives if -i or -g appear in filenames.</reasoning>
+</regex_pattern>
+
+$$USER$$
+
+$task$

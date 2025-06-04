@@ -1,0 +1,204 @@
+$$SYSTEM$$
+
+You are a senior software engineer at a fast-growing company building tools for bioinformatics professionals.
+
+$$USER$$
+
+# Nextflow Script to Execution Examples
+
+You will be given Nextflow script snippets and need to create concrete execution examples with realistic inputs. For each script, provide some examples showing:
+
+1. The actual shell commands that would run (with variables substituted)
+2. The eBPF sched_process_exec events that would be captured during execution
+
+## Input Format
+
+You'll receive a `<source>` block containing a Nextflow script snippet with:
+- Variable definitions using Groovy syntax (e.g., `def variable = expression`)
+- Shell script blocks within triple quotes (`"""`)
+- Template variables using `$variable` or `${variable}` syntax
+- Command substitutions using `$(command)` syntax
+
+## Output Format
+
+For each example, provide:
+
+```xml
+<example>
+<label>Brief description of the input file type</label>
+
+<script>
+[The actual shell commands that would execute, with all variables substituted with realistic values]
+</script>
+
+<sched_process_exec_events>
+COMM: [process_name]; ARGV: [JSON array of command and arguments]
+[One line for each process that would be spawned]
+</sched_process_exec_events>
+</example>
+```
+
+## Key Rules
+
+1. **Variable Substitution**: Replace all template variables with realistic filenames and values
+   - For `.gz` files, use appropriate commands (e.g., `zcat` for gzipped files)
+   - For file operations, use realistic bioinformatics filenames
+
+2. **Process Tracking**: Include ALL processes that would be spawned, including:
+   - Main commands in pipelines (each command in a pipe gets its own process)
+   - Commands inside `$()` command substitutions
+   - `cat` commands from heredocs (`cat <<-END`)
+   - Any commands that appear in the script
+
+3. **Realistic Examples**: Use domain-appropriate filenames:
+   - UniProt: `uniprot_*.fasta.gz`
+   - NCBI: `GCF_*.fna` or similar
+   - Ensembl: `Species.Assembly.type.fa.gz`
+   - Other common bioinformatics formats
+
+4. **Command Arguments**: 
+   - Show the exact argv array as it would appear to the kernel
+   - Include all flags and arguments as separate array elements
+   - Quote strings in the JSON array format
+
+5. **Version Numbers**: Use realistic version numbers (e.g., "4.8" for sed)
+
+## Example Analysis Process
+
+Given: `$command $fasta | cut -d "|" -f1 > ${outfile}.fixed.fa`
+
+1. Identify variables: `$command`, `$fasta`, `${outfile}`
+2. Determine their values from the script logic
+3. For a gzipped file: `command="zcat"`, `fasta="input.fa.gz"`, `outfile="input"`
+4. Result: `zcat input.fa.gz | cut -d "|" -f1 > input.fixed.fa`
+5. Processes spawned: `zcat` and `cut`
+
+Remember: Each pipe segment, command substitution, and heredoc spawns a separate process that should be tracked in the sched_process_exec_events.
+
+$$ASSISTANT$$
+
+Acknowledged.
+
+$$USER$$
+
+Extract 3 examples from lines 22:29 of following Nextflow config, ignoring commands outside the identified lines (eg, in stub blocks or other conditional branches):
+
+<source>
+0: process PREPROCESS_TRANSCRIPTS_FASTA_GENCODE {
+1:     tag "$fasta"
+2: 
+3:     conda "${moduleDir}/environment.yml"
+4:     container "${ workflow.containerEngine == 'singularity' && !task.ext.singularity_pull_docker_container ?
+5:         'https://depot.galaxyproject.org/singularity/ubuntu:20.04' :
+6:         'nf-core/ubuntu:20.04' }"
+7: 
+8:     input:
+9:     path fasta
+10: 
+11:     output:
+12:     path "*.fa"        , emit: fasta
+13:     path "versions.yml", emit: versions
+14: 
+15:     when:
+16:     task.ext.when == null || task.ext.when
+17: 
+18:     script:
+19:     def gzipped = fasta.toString().endsWith('.gz')
+20:     def outfile = gzipped ? file(fasta.baseName).baseName : fasta.baseName
+21:     def command = gzipped ? 'zcat' : 'cat'
+22:     """
+23:     $command $fasta | cut -d "|" -f1 > ${outfile}.fixed.fa
+24: 
+25:     cat <<-END_VERSIONS > versions.yml
+26:     "${task.process}":
+27:         sed: \$(echo \$(sed --version 2>&1) | sed 's/^.*GNU sed) //; s/ .*\$//')
+28:     END_VERSIONS
+29:     """
+30: 
+31:     stub:
+32:     def gzipped = fasta.toString().endsWith('.gz')
+33:     def outfile = gzipped ? file(fasta.baseName).baseName : fasta.baseName
+34:     """
+35:     touch ${outfile}.fixed.fa
+36: 
+37:     cat <<-END_VERSIONS > versions.yml
+38:     "${task.process}":
+39:         sed: \$(echo \$(sed --version 2>&1) | sed 's/^.*GNU sed) //; s/ .*\$//')
+40:     END_VERSIONS
+41:     """
+42: }
+43: 
+</source>
+
+$$ASSISTANT$$
+
+<example>
+<label>Gzipped UniProt FASTA file</label>
+
+<script>
+zcat uniprot_sprot.fasta.gz | cut -d "|" -f1 > uniprot_sprot.fixed.fa
+
+cat <<-END_VERSIONS > versions.yml
+"PROCESS_NAME":
+    sed: 4.8
+END_VERSIONS
+</script>
+
+<sched_process_exec_events>
+COMM: zcat; ARGV: ["zcat", "uniprot_sprot.fasta.gz"]
+COMM: cut; ARGV: ["cut", "-d", "|", "-f1"]
+COMM: cat; ARGV: ["cat"]
+COMM: sed; ARGV: ["sed", "--version"]
+COMM: sed; ARGV: ["sed", "s/^.*GNU sed) //; s/ .*$//"]
+</sched_process_exec_events>
+</example>
+
+<example>
+<label>Uncompressed NCBI RefSeq FASTA</label>
+
+<script>
+cat GCF_000005845.2_ASM584v2_genomic.fna | cut -d "|" -f1 > GCF_000005845.2_ASM584v2_genomic.fixed.fa
+
+cat <<-END_VERSIONS > versions.yml
+"PROCESS_NAME":
+    sed: 4.8
+END_VERSIONS
+</script>
+
+<sched_process_exec_events>
+COMM: cat; ARGV: ["cat", "GCF_000005845.2_ASM584v2_genomic.fna"]
+COMM: cut; ARGV: ["cut", "-d", "|", "-f1"]
+COMM: cat; ARGV: ["cat"]
+COMM: sed; ARGV: ["sed", "--version"]
+COMM: sed; ARGV: ["sed", "s/^.*GNU sed) //; s/ .*$//"]
+</sched_process_exec_events>
+</example>
+
+<example>
+<label>Gzipped Ensembl protein FASTA</label>
+
+<script>
+zcat Homo_sapiens.GRCh38.pep.all.fa.gz | cut -d "|" -f1 > Homo_sapiens.GRCh38.pep.all.fixed.fa
+
+cat <<-END_VERSIONS > versions.yml
+"PROCESS_NAME":
+    sed: 4.8
+END_VERSIONS
+</script>
+
+<sched_process_exec_events>
+COMM: zcat; ARGV: ["zcat", "Homo_sapiens.GRCh38.pep.all.fa.gz"]
+COMM: cut; ARGV: ["cut", "-d", "|", "-f1"]
+COMM: cat; ARGV: ["cat"]
+COMM: sed; ARGV: ["sed", "--version"]
+COMM: sed; ARGV: ["sed", "s/^.*GNU sed) //; s/ .*$//"]
+</sched_process_exec_events>
+</example>
+
+$$USER$$
+
+Extract $n_examples$ from lines $start_line$:$end_line$ of following Nextflow config, ignoring commands outside the identified lines (eg, in stub blocks or other conditional branches):
+
+<source>
+$source$
+</source>

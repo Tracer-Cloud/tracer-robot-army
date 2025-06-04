@@ -1,0 +1,153 @@
+$$SYSTEM$$
+
+You are an expert bioinformatician tasked with generating concise, descriptive labels for Nextflow processes.
+
+$$USER$$
+
+# Nextflow Process Description Generator
+
+Your goal is to create short descriptions (2-5 words) that clearly communicate what each process does.
+
+## Guidelines:
+
+1. **Be concise**: Use only 2-5 words, focusing on the core function
+2. **Be specific**: Identify the main bioinformatics operation being performed
+3. **Use action words**: Start with verbs when possible (e.g., "Extract", "Filter", "Align", "Quantify")
+4. **Avoid technical jargon**: Use clear, understandable terms
+5. **Focus on the purpose**: What biological/analytical goal does this achieve?
+
+## Analysis approach:
+
+1. Look at the process name for clues
+2. Examine the tool being used (conda/container info)
+3. Check the main command in the script section
+4. Consider input/output file types
+5. Look for key command-line arguments
+
+## Examples of good descriptions:
+
+- **CAT_FASTQ**: "Concatenate FASTQ files"
+- **FASTQC**: "Quality assessment"
+- **TRIMGALORE**: "Adapter trimming"
+- **STAR_ALIGN**: "Align RNA-seq reads"
+- **SALMON_QUANT**: "Quantify transcript abundance"
+- **PICARD_MARKDUPLICATES**: "Mark duplicate reads"
+- **BEDTOOLS_INTERSECT**: "Find overlapping genomic regions"
+
+## Input format:
+
+You will receive:
+```
+<process>PROCESS_NAME</process>
+<source>
+[Nextflow process code]
+</source>
+```
+
+## Output format:
+
+Respond with only the short description, no additional explanation. For example:
+"Extract unique molecular identifiers"
+
+## Example analysis:
+
+Given the process UMITOOLS_EXTRACT that:
+- Uses umi_tools extract command
+- Takes FASTQ files as input
+- Outputs modified FASTQ files
+- The tool name suggests UMI (Unique Molecular Identifier) extraction
+
+The description would be: "Extract unique molecular identifiers"
+
+Now, analyze the provided Nextflow process and generate a concise description.
+
+$$ASSISTANT$$
+
+Okay.
+
+$$USER$$
+
+<process>SAMTOOLS_SORT</process>
+<source>
+0: process SAMTOOLS_SORT {
+1:     tag "$meta.id"
+2:     label 'process_medium'
+3: 
+4:     conda "${moduleDir}/environment.yml"
+5:     container "${ workflow.containerEngine == 'singularity' && !task.ext.singularity_pull_docker_container ?
+6:         'https://depot.galaxyproject.org/singularity/samtools:1.21--h50ea8bc_0' :
+7:         'biocontainers/samtools:1.21--h50ea8bc_0' }"
+8: 
+9:     input:
+10:     tuple val(meta) , path(bam)
+11:     tuple val(meta2), path(fasta)
+12: 
+13:     output:
+14:     tuple val(meta), path("*.bam"),  emit: bam,  optional: true
+15:     tuple val(meta), path("*.cram"), emit: cram, optional: true
+16:     tuple val(meta), path("*.crai"), emit: crai, optional: true
+17:     tuple val(meta), path("*.csi"),  emit: csi,  optional: true
+18:     path  "versions.yml",            emit: versions
+19: 
+20:     when:
+21:     task.ext.when == null || task.ext.when
+22: 
+23:     script:
+24:     def args = task.ext.args ?: ''
+25:     def prefix = task.ext.prefix ?: "${meta.id}"
+26:     def extension = args.contains("--output-fmt sam") ? "sam" :
+27:                     args.contains("--output-fmt cram") ? "cram" :
+28:                     "bam"
+29:     def reference = fasta ? "--reference ${fasta}" : ""
+30:     if ("$bam" == "${prefix}.bam") error "Input and output names are the same, use \"task.ext.prefix\" to disambiguate!"
+31: 
+32:     """
+33:     samtools cat \\
+34:         ${bam} \\
+35:     | \\
+36:     samtools sort \\
+37:         $args \\
+38:         -T ${prefix} \\
+39:         --threads $task.cpus \\
+40:         ${reference} \\
+41:         -o ${prefix}.${extension} \\
+42:         -
+43: 
+44:     cat <<-END_VERSIONS > versions.yml
+45:     "${task.process}":
+46:         samtools: \$(echo \$(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*\$//')
+47:     END_VERSIONS
+48:     """
+49: 
+50:     stub:
+51:     def args = task.ext.args ?: ''
+52:     def prefix = task.ext.prefix ?: "${meta.id}"
+53:     def extension = args.contains("--output-fmt sam") ? "sam" :
+54:                     args.contains("--output-fmt cram") ? "cram" :
+55:                     "bam"
+56:     """
+57:     touch ${prefix}.${extension}
+58:     if [ "${extension}" == "bam" ];
+59:     then
+60:         touch ${prefix}.${extension}.csi
+61:     elif [ "${extension}" == "cram" ];
+62:     then
+63:         touch ${prefix}.${extension}.crai
+64:     fi
+65: 
+66:     cat <<-END_VERSIONS > versions.yml
+67:     "${task.process}":
+68:         samtools: \$(echo \$(samtools --version 2>&1) | sed 's/^.*samtools //; s/Using.*\$//')
+69:     END_VERSIONS
+70:     """
+71: }
+72: 
+</source>
+
+$$ASSISTANT$$
+
+Sort BAM files
+
+$$USER$$
+
+$task$
