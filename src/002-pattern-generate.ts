@@ -1,7 +1,7 @@
 import type { ExtractResult } from "./001-source-extract";
 
-import { readdir, readFile } from "fs/promises";
-import { join } from "path";
+import { readdir, readFile, exists } from "fs/promises";
+import { basename, join } from "path";
 import { formatAnthropicPrompt } from "./common";
 import Anthropic from "@anthropic-ai/sdk";
 import { writeFile } from "fs/promises";
@@ -31,6 +31,12 @@ export async function main() {
 
   for (const file of files) {
     if (!file.endsWith(".json")) continue;
+    // Save individual result file
+    const resultFilename = `${basename(file)}.txt`;
+    if (await exists(join(resultsDir, resultFilename))) {
+      console.log(`⏭️ Skipping ${resultFilename} - already exists`);
+      continue;
+    }
 
     const content = await readFile(join(extractsDir, file), "utf-8");
     const extract = JSON.parse(content) as ExtractResult;
@@ -53,9 +59,6 @@ ${extract.response}
 
     // Create result object with all metadata
     const result = `${task} ${(response.content[0] as any)?.text || ""}`;
-
-    // Save individual result file
-    const resultFilename = `${process}_${resultCounter}.txt`;
 
     await writeFile(join(resultsDir, resultFilename), result);
 

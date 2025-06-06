@@ -1,40 +1,143 @@
-import { readdir, readFile, stat, writeFile, mkdir } from "fs/promises";
-import { join, basename } from "path";
+import { readdir, readFile, stat, writeFile, mkdir, exists } from "fs/promises";
+import { dirname, join } from "path";
 import Anthropic from "@anthropic-ai/sdk";
-import { formatAnthropicPrompt } from "./common";
+import { formatAnthropicPrompt, scandir } from "./common";
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-async function findProcessFiles(dir: string): Promise<string[]> {
-  const processRegex = /process [A-Z]+_\w+ {/;
-  const files: string[] = [];
+export async function findFilesContainingProcess() {
+  let filesContainingProcess: string[] = [];
 
-  async function scan(currentDir: string): Promise<void> {
-    try {
-      for (const entry of await readdir(currentDir)) {
-        const fullPath = join(currentDir, entry);
-        const stats = await stat(fullPath);
+  const repositories = (
+    await readFile(join(process.cwd(), "./inputs/repositories.txt"), "utf-8")
+  )
+    .split("\n")
+    .filter((l) => l)
+    .map((line) => {
+      const [repo, stars] = line.split(", ");
+      const repoName = repo!.split(":")[1]!;
+      const starCount = parseInt(stars!.split(":")[1]!);
+      return { repoName, starCount };
+    });
 
-        if (stats.isDirectory()) {
-          await scan(fullPath);
-        } else if (stats.isFile()) {
-          try {
-            const content = await readFile(fullPath, "utf-8");
-            if (processRegex.test(content)) {
-              files.push(fullPath);
-            }
-          } catch {} // Skip unreadable files
-        }
-      }
-    } catch {} // Skip unreadable directories
+  const interestingDirs = [
+    join(process.cwd(), "../nf-core/modules/modules/nf-core"),
+  ];
+  for (const { repoName, starCount } of repositories) {
+    if (starCount < 100) continue;
+    const dir = join(process.cwd(), `../${repoName}/modules/local`);
+    if (await exists(dir)) {
+      interestingDirs.push(dir);
+    }
   }
 
-  await scan(dir);
-  return files;
+  for (const dir of interestingDirs) {
+    const matches = await scandir(dir, /\bprocess [A-Z_]+ {/g);
+    filesContainingProcess = filesContainingProcess.concat(
+      matches.map((m) => m.file)
+    );
+  }
+
+  return filesContainingProcess;
+}
+
+export interface SourceCodeSlice {
+  startIndex: number;
+  endIndex: number;
+  startLine: number;
+  endLine: number;
+}
+
+export interface NextflowRuleTargetList {
+  process: string;
+  file: string;
+  error?: string | null;
+  result?: {
+    tripleQuotedSegments: SourceCodeSlice[];
+    templateFile?: string | null;
+  } | null;
+}
+
+export async function extractRuleTargetsFromFile(
+  file: string
+): Promise<NextflowRuleTargetList> {
+  const content = await readFile(file, "utf-8");
+
+  const process = content.match(/process (\w+)/)?.[1]!;
+
+  const scriptBlockStartMatch = content.match(/\n\s*script:\s/);
+  const scriptBlockStartIndex = scriptBlockStartMatch?.index ?? -1;
+
+  if (scriptBlockStartIndex === -1) {
+    return {
+      process,
+      file,
+      error: "Couldn't find script block",
+    };
+  }
+
+  // Tiny tokenizer to find script block end
+  let i = scriptBlockStartIndex + scriptBlockStartMatch![0].length;
+  let inTripleQuote = false;
+  let scriptBlockEndIndex = content.length;
+  while (i < content.length - 2) {
+    if (content.slice(i, i + 3) === '"""') {
+      inTripleQuote = !inTripleQuote;
+      i += 3;
+    } else if (!inTripleQuote && /^\n\s*\w+:\s/.test(content.slice(i))) {
+      scriptBlockEndIndex = i;
+      break;
+    } else {
+      i++;
+    }
+  }
+
+  let contentSlice = content.slice(0, scriptBlockEndIndex);
+
+  const tripleQuotedSegments: SourceCodeSlice[] = [];
+
+  const tripleQuotedRegex = /"""(.*?)"""/gs;
+  tripleQuotedRegex.lastIndex = scriptBlockStartIndex;
+  let match;
+  while ((match = tripleQuotedRegex.exec(contentSlice)) !== null) {
+    tripleQuotedSegments.push({
+      startIndex: match.index,
+      endIndex: match.index + match[0].length,
+      startLine: content.slice(0, match.index).split("\n").length - 1,
+      endLine: content.slice(0, match.index + match[0].length).split("\n")
+        .length,
+    });
+  }
+
+  const templateNameRegex = /template.*?(['"])(.+?)\1/g;
+  templateNameRegex.lastIndex = scriptBlockStartIndex;
+  let templateName = templateNameRegex.exec(contentSlice)?.[2] ?? null;
+  let templateFile: string | undefined;
+
+  template: if (templateName) {
+    templateFile = join(dirname(file), "templates", templateName);
+    if (!(await exists(templateFile))) {
+      templateName = null;
+      break template;
+    }
+  }
+
+  if (!templateName && !tripleQuotedSegments.length) {
+    return {
+      process,
+      file,
+      error: "Couldn't find executable content in script block",
+    };
+  }
+
+  return {
+    process,
+    file,
+    result: { tripleQuotedSegments, templateFile },
+  };
 }
 
 export interface ExtractResult {
-  id: number;
   timestamp: string;
   source: {
     file: string;
@@ -53,13 +156,31 @@ async function main() {
     ),
   };
 
-  const files = await findProcessFiles(join(process.cwd(), "../modules"));
+  const files = await findFilesContainingProcess();
+
   console.log(`Found ${files.length} files with process definitions`);
 
-  if (files.length === 0) return;
+  const targets = await Promise.all(
+    files.map((f) => extractRuleTargetsFromFile(f))
+  );
+
+  const errorCount = targets.filter((t) => t.error).length;
+  const successCount = targets.filter((t) => t.result).length;
+  const templateCount = targets.filter((t) => t.result?.templateFile).length;
+  const tripleQuotedCount = targets.reduce(
+    (pv, t) => pv + (t.result?.tripleQuotedSegments.length ?? 0),
+    0
+  );
+
+  console.log("\n📊 Target Statistics:");
+  console.log(`Total targets: ${targets.length}`);
+  console.log(`✅ Successful extractions: ${successCount}`);
+  console.log(`❌ Failed extractions: ${errorCount}`);
+  console.log(`📄 Template files found: ${templateCount}`);
+  console.log(`📝 Triple-quoted segments found: ${tripleQuotedCount}`);
+  console.log("---\n");
 
   const allResults: any[] = [];
-  let resultCounter = 0;
 
   // Ensure results directory exists
   const resultsDir = join(process.cwd(), "results/001-source-extract");
@@ -69,55 +190,20 @@ async function main() {
     // Directory might already exist, ignore the error
   }
 
-  for await (const file of files) {
-    const content = await readFile(file, "utf-8");
+  for await (const target of targets) {
+    if (!target.result) continue;
+    for (const segment of target.result.tripleQuotedSegments) {
+      const resultFilename = `${target.process}_${segment.startLine}_${segment.endLine}.json`;
 
-    const process = content.match(/process (\w+)/)?.[1];
+      if (await exists(join(resultsDir, resultFilename))) {
+        console.log(`⏭️ Skipping ${resultFilename} - already exists`);
+        continue;
+      } else {
+        console.log(`🔎 Processing ${resultFilename}`);
+      }
 
-    const scriptLineStartIndex = content
-      .split("\n")
-      .findIndex((line) => /script:\s*($|\/\/)/.test(line));
+      const content = await readFile(target.file, "utf-8");
 
-    const scriptLineEndIndex =
-      scriptLineStartIndex +
-      1 +
-      content
-        .split("\n")
-        .slice(scriptLineStartIndex + 1)
-        .findIndex((line) => /^\s*\w+:\s*$/.test(line));
-
-    const interestingSegments: { startLine: number; endLine: number }[] = [];
-
-    if (scriptLineStartIndex === -1 || scriptLineEndIndex === -1) return;
-    const scriptContent = content
-      .split("\n")
-      .slice(scriptLineStartIndex, scriptLineEndIndex)
-      .join("\n");
-
-    const tripleQuotedRegex = /"""(.*?)"""/gs;
-    let match;
-    let hasTripleQuoted = false;
-
-    while ((match = tripleQuotedRegex.exec(scriptContent)) !== null) {
-      hasTripleQuoted = true;
-      const startLine =
-        scriptLineStartIndex +
-        scriptContent.slice(0, match.index).split("\n").length -
-        1;
-      const endLine = startLine + match[0].split("\n").length;
-      interestingSegments.push({ startLine, endLine });
-    }
-
-    if (!interestingSegments.length) continue;
-
-    if (!hasTripleQuoted) {
-      interestingSegments.push({
-        startLine: scriptLineStartIndex,
-        endLine: scriptLineEndIndex,
-      });
-    }
-
-    for (const segment of interestingSegments) {
       const source = content
         .split("\n")
         .map((line, i) => `${i}: ${line}`)
@@ -136,10 +222,9 @@ async function main() {
 
       // Create result object with all metadata
       const result: ExtractResult = {
-        id: ++resultCounter,
         timestamp: new Date().toISOString(),
         source: {
-          file,
+          file: target.file,
           start_line: segment.startLine,
           end_line: segment.endLine,
           content: parameters.source,
@@ -149,18 +234,12 @@ async function main() {
 
       allResults.push(result);
 
-      // Save individual result file
-      const resultFilename = `${process}_${resultCounter}_${basename(
-        file,
-        ".nf"
-      )}.json`;
-
       await writeFile(
         join(resultsDir, resultFilename),
         JSON.stringify(result, null, 2)
       );
 
-      console.log(`✅ Saved result ${resultCounter} to ${resultFilename}`);
+      console.log(`✅ Saved result to ${resultFilename}`);
       console.log(`📄 Source: ${result.source.file}`);
       console.log(`📝 Lines: ${segment.startLine}-${segment.endLine}`);
       console.log(`📊 Response length: ${result.response.length} chars`);
@@ -173,4 +252,6 @@ async function main() {
   console.log(`📋 Saved to: results/001-source-extract/`);
 }
 
-main().catch(console.error);
+if (require.main === module) {
+  main();
+}

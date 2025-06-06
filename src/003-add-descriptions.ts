@@ -1,4 +1,4 @@
-import { readdir, readFile } from "fs/promises";
+import { readdir, readFile, exists } from "fs/promises";
 import { join } from "path";
 import { extractXml, formatAnthropicPrompt } from "./common";
 import Anthropic from "@anthropic-ai/sdk";
@@ -25,6 +25,12 @@ export async function main() {
 
   for (const inputFile of inputFiles) {
     if (!inputFile.endsWith(".txt")) continue;
+    const resultFilename = inputFile;
+    if (await exists(join(resultsDir, resultFilename))) {
+      console.log(`⏭️ Skipping ${resultFilename} - already exists`);
+      continue;
+    }
+
     const inputContent = await readFile(join(inputDir, inputFile), "utf8");
     const tags = extractXml(inputContent);
 
@@ -37,7 +43,6 @@ export async function main() {
     const responseContent = (response.content[0] as any)?.text || "";
     const result = `<process_description>${responseContent}</process_description>\n${inputContent}`;
 
-    const resultFilename = inputFile;
     await writeFile(join(resultsDir, resultFilename), result);
 
     console.log(`✅ Saved ${resultFilename}`);

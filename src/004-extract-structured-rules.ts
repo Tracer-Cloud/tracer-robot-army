@@ -1,6 +1,10 @@
 import { readdir, readFile } from "fs/promises";
 import { join } from "path";
-import { extractXml, formatAnthropicPrompt } from "./common";
+import {
+  extractXml,
+  formatAnthropicPrompt,
+  type StructuredRule,
+} from "./common";
 import { writeFile } from "fs/promises";
 import { mkdir } from "fs/promises";
 
@@ -19,7 +23,7 @@ export async function main() {
     // Directory might already exist, ignore the error
   }
 
-  const results = [] as any[];
+  const results: StructuredRule[] = [];
 
   for (const inputFile of inputFiles) {
     if (!inputFile.endsWith(".txt")) continue;
@@ -31,7 +35,6 @@ export async function main() {
       (t) => t.name === "process_description"
     )!.content;
 
-    const description = `${processDescription} (${processId})`;
     const pattern = tags.find((t) => t.name === "pattern")!.content;
     const testFixtures = tags
       .filter((t) => t.name === "example")
@@ -56,11 +59,27 @@ export async function main() {
         return { label, script, commands };
       });
 
-    results.push({ description, pattern, testFixtures });
+    const rule = {
+      id: `nextflow/core/${processId}`,
+      source: {
+        file: tags.find((t) => t.name === "file")!.content,
+      },
+      label: processDescription,
+      pattern,
+      quality: {
+        ai_self_eval_pattern_score: {
+          value: tags.find((t) => t.name === "quality_score")!.content,
+          reasoning: tags.find((t) => t.name === "reasoning")!.content,
+        },
+      },
+      test_fixtures: testFixtures,
+    };
+
+    results.push(rule);
   }
 
   writeFile(
-    join(resultsDir, "nf-rnaseq-process-list.json"),
+    join(resultsDir, "nextflow-process.json"),
     JSON.stringify(results, null, 2)
   );
 }
