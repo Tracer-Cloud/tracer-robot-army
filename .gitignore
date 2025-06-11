@@ -34,5 +34,8 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .DS_Store
 
 # Generated results
-results/
-results-prev/
+results/*
+!results/004-extract-structured-rules/
+
+# Large test data files
+inputs/rnaseq-log-ebpf.txt

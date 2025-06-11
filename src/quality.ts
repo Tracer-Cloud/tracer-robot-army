@@ -6,17 +6,20 @@ import {
   extractRuleTargetsFromFile,
   type NextflowRuleTargetList,
 } from "./001-source-extract";
+import readline from "readline";
+import { readFile } from "fs/promises";
 
 interface QualityResult {
   loggedAs: string;
   processName?: string | null;
   ruleTargets?: NextflowRuleTargetList;
   rules?: StructuredRule[];
-  ruleResults?: {
+  ruleResultsSynthetic?: {
     falsePositives: string[];
     falseNegatives: number[];
     truePositives: number[];
   };
+  ruleResultsReal?: { command: string; rule: StructuredRule }[];
 }
 
 // 1. Can we see it in the logs
@@ -29,10 +32,12 @@ interface QualityResult {
 //   b) nothing in signature
 
 async function main() {
-  const inputFile = join(process.cwd(), "inputs/rnaseq-log-raw.txt");
+  const inputFile = join(process.cwd(), "inputs/rnaseq-log-nextflow.txt");
   const content = await fs.promises.readFile(inputFile, "utf-8");
 
   // ====== Logged Processes ======
+
+  console.log("Processing Logged Processes");
 
   let loggedProcesses = content
     .split("\n")
@@ -49,6 +54,8 @@ async function main() {
   }));
 
   // ====== Source Hits (workflow) ======
+
+  console.log("Processing Source Hits (workflow)");
 
   const includeProcessRegex = new RegExp(/include\s*{\s*[A-Z].+?}/g);
   const workflowIncludes = await scandir(
@@ -75,6 +82,8 @@ async function main() {
 
   // ====== Source Hits (modules) ======
 
+  console.log("Processing Source Hits (modules)");
+
   const processModuleFiles = await findFilesContainingProcess();
   const processModuleTargets = await Promise.all(
     processModuleFiles.map((f) => extractRuleTargetsFromFile(f))
@@ -89,6 +98,8 @@ async function main() {
   }
 
   // ====== Rule Evaluation ======
+
+  console.log("Processing Rule Evaluation");
 
   const ruleFilePath = join(
     process.cwd(),
@@ -107,6 +118,7 @@ async function main() {
   const truePositivesByProcess: Record<string, number[]> = {};
 
   for (const ruleA of rules) {
+    console.log(ruleA.id);
     const commandSets = ruleA.test_fixtures;
     const process = ruleA.id.split("/").slice(-1)[0]!;
     if (!falsePositivesByProcess[process]) {
@@ -143,11 +155,44 @@ async function main() {
   for (let r of results) {
     if (!r.processName) continue;
     r.rules = rulesByProcess[r.processName];
-    r.ruleResults = {
+    r.ruleResultsSynthetic = {
       falsePositives: Array.from(falsePositivesByProcess[r.processName] ?? []),
       falseNegatives: falseNegativesByProcess[r.processName] ?? [],
       truePositives: truePositivesByProcess[r.processName] ?? [],
     };
+  }
+
+  // ====== eBPF Logs ======
+
+  console.log("Processing eBPF Logs");
+
+  const ebpfCommands = (
+    await readFile(
+      join(process.cwd(), "inputs/rnaseq-log-ebpf-extracted-commands.txt"),
+      "utf8"
+    )
+  )
+    .split("\n")
+    .map((c) => c.slice(1, -1));
+
+  const matchingEbpfCommandsByProcess: Record<
+    string,
+    { command: string; rule: StructuredRule }[]
+  > = {};
+  for (const command of ebpfCommands) {
+    const rules = matcher.matchCommand(command);
+    for (const rule of rules) {
+      const process = rule.id.split("/").slice(-1)[0]!;
+      if (!matchingEbpfCommandsByProcess[process]) {
+        matchingEbpfCommandsByProcess[process] = [];
+      }
+      matchingEbpfCommandsByProcess[process].push({ command, rule });
+    }
+  }
+
+  for (let r of results) {
+    if (!r.processName) continue;
+    r.ruleResultsReal = matchingEbpfCommandsByProcess[r.processName] ?? [];
   }
 
   // ====== Print Results ======
@@ -173,14 +218,20 @@ async function main() {
 
       failReason = `Cannot extract rule from source code: ${detail}`;
     }
-    if (r.rules && r.ruleResults) {
-      const { falseNegatives, falsePositives, truePositives } = r.ruleResults;
+    if (r.rules && r.ruleResultsSynthetic) {
+      const { falseNegatives, falsePositives, truePositives } =
+        r.ruleResultsSynthetic;
       const totalExamples = truePositives.length + falseNegatives.length;
       if (falseNegatives.length) {
         failReason = `False negative: Did not match for ${falseNegatives.length}/${totalExamples} tests`;
       } else if (falsePositives.length) {
         const falsePositiveList = falsePositives.join(", ");
         failReason = `False positive: Matched, but possibly confused with: ${falsePositiveList}`;
+      }
+    }
+    if (r.rules && r.ruleResultsReal && !failReason) {
+      if (r.ruleResultsReal.length === 0) {
+        failReason = `Matched on synthetic fixtures, but not on real data`;
       }
     }
 

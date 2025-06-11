@@ -148,6 +148,16 @@ export interface ExtractResult {
   response: string;
 }
 
+interface BatchRequest {
+  custom_id: string;
+  params: any;
+  metadata: {
+    target: NextflowRuleTargetList;
+    segment: SourceCodeSlice;
+    resultFilename: string;
+  };
+}
+
 async function main() {
   const promptContent = {
     extract: await readFile(
@@ -180,8 +190,6 @@ async function main() {
   console.log(`📝 Triple-quoted segments found: ${tripleQuotedCount}`);
   console.log("---\n");
 
-  const allResults: any[] = [];
-
   // Ensure results directory exists
   const resultsDir = join(process.cwd(), "results/001-source-extract");
   try {
@@ -190,7 +198,10 @@ async function main() {
     // Directory might already exist, ignore the error
   }
 
-  for await (const target of targets) {
+  // Collect all batch requests
+  const batchRequests: BatchRequest[] = [];
+
+  for (const target of targets) {
     if (!target.result) continue;
     for (const segment of target.result.tripleQuotedSegments) {
       const resultFilename = `${target.process}_${segment.startLine}_${segment.endLine}.json`;
@@ -198,12 +209,9 @@ async function main() {
       if (await exists(join(resultsDir, resultFilename))) {
         console.log(`⏭️ Skipping ${resultFilename} - already exists`);
         continue;
-      } else {
-        console.log(`🔎 Processing ${resultFilename}`);
       }
 
       const content = await readFile(target.file, "utf-8");
-
       const source = content
         .split("\n")
         .map((line, i) => `${i}: ${line}`)
@@ -218,33 +226,125 @@ async function main() {
 
       const prompt = formatAnthropicPrompt(promptContent.extract, parameters);
 
-      const response = await anthropic.messages.create(prompt);
-
-      // Create result object with all metadata
-      const result: ExtractResult = {
-        timestamp: new Date().toISOString(),
-        source: {
-          file: target.file,
-          start_line: segment.startLine,
-          end_line: segment.endLine,
-          content: parameters.source,
+      batchRequests.push({
+        custom_id: `${target.process}_${segment.startLine}_${segment.endLine}`,
+        params: prompt,
+        metadata: {
+          target,
+          segment,
+          resultFilename,
         },
-        response: (response.content[0] as any)?.text || "",
-      };
-
-      allResults.push(result);
-
-      await writeFile(
-        join(resultsDir, resultFilename),
-        JSON.stringify(result, null, 2)
-      );
-
-      console.log(`✅ Saved result to ${resultFilename}`);
-      console.log(`📄 Source: ${result.source.file}`);
-      console.log(`📝 Lines: ${segment.startLine}-${segment.endLine}`);
-      console.log(`📊 Response length: ${result.response.length} chars`);
-      console.log("---");
+      });
     }
+  }
+
+  if (batchRequests.length === 0) {
+    console.log("No new requests to process.");
+    return;
+  }
+
+  console.log(`🚀 Submitting batch with ${batchRequests.length} requests...`);
+
+  // Create batch request
+  const messageBatch = await anthropic.messages.batches.create({
+    requests: batchRequests.map((req) => ({
+      custom_id: req.custom_id,
+      params: req.params,
+    })),
+  });
+
+  console.log(`📋 Batch created with ID: ${messageBatch.id}`);
+  console.log(`⏳ Waiting for batch to complete...`);
+
+  // Poll for batch completion
+  let batchStatus = messageBatch;
+  while (batchStatus.processing_status !== "ended") {
+    await new Promise((resolve) => setTimeout(resolve, 10000)); // Wait 10 seconds
+    batchStatus = await anthropic.messages.batches.retrieve(messageBatch.id);
+    console.log(
+      `📊 Batch status: ${batchStatus.processing_status} (${batchStatus.request_counts.processing} processing, ${batchStatus.request_counts.succeeded} succeeded, ${batchStatus.request_counts.errored} errored)`
+    );
+  }
+
+  console.log(`✅ Batch completed! Processing results...`);
+
+  // Get results using the SDK method
+  const allResults: ExtractResult[] = [];
+
+  try {
+    // Stream results file in memory-efficient chunks, processing one at a time
+    for await (const result of await anthropic.messages.batches.results(
+      messageBatch.id
+    )) {
+      const req = batchRequests.find((r) => r.custom_id === result.custom_id);
+
+      if (!req) {
+        console.log(`❌ No matching request found for ${result.custom_id}`);
+        continue;
+      }
+
+      switch (result.result.type) {
+        case "succeeded":
+          const content = await readFile(req.metadata.target.file, "utf-8");
+          const source = content
+            .split("\n")
+            .map((line, i) => `${i}: ${line}`)
+            .join("\n");
+
+          const extractResult: ExtractResult = {
+            timestamp: new Date().toISOString(),
+            source: {
+              file: req.metadata.target.file,
+              start_line: req.metadata.segment.startLine,
+              end_line: req.metadata.segment.endLine,
+              content: source,
+            },
+            response:
+              result.result.message?.content?.[0]?.type === "text"
+                ? result.result.message.content[0].text
+                : "",
+          };
+
+          allResults.push(extractResult);
+
+          await writeFile(
+            join(resultsDir, req.metadata.resultFilename),
+            JSON.stringify(extractResult, null, 2)
+          );
+
+          console.log(`✅ Saved result to ${req.metadata.resultFilename}`);
+          console.log(`📄 Source: ${extractResult.source.file}`);
+          console.log(
+            `📝 Lines: ${req.metadata.segment.startLine}-${req.metadata.segment.endLine}`
+          );
+          console.log(
+            `📊 Response length: ${extractResult.response.length} chars`
+          );
+          console.log("---");
+          break;
+
+        case "errored":
+          const errorType =
+            (result.result.error as any)?.type === "invalid_request"
+              ? "Validation"
+              : "Server";
+          console.log(
+            `❌ ${errorType} error: ${result.custom_id}`,
+            result.result.error
+          );
+          break;
+        default:
+          console.log(
+            `Request ${result.result.type ?? "not handled"}: ${
+              result.custom_id
+            }`,
+            result.result
+          );
+          break;
+      }
+    }
+  } catch (error) {
+    console.error("Error processing batch results:", error);
   }
 
   console.log(`\n🎉 Processing complete!`);

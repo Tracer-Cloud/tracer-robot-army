@@ -35,7 +35,8 @@ export async function main() {
       (t) => t.name === "process_description"
     )!.content;
 
-    const pattern = tags.find((t) => t.name === "pattern")!.content;
+    let pattern = tags.find((t) => t.name === "pattern")!.content;
+    pattern = pattern.replace(/^\^/, "").replace(/\$$/, "");
     const testFixtures = tags
       .filter((t) => t.name === "example")
       .map(({ children }) => {
